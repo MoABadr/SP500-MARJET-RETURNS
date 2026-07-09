@@ -1,5 +1,596 @@
 # SP500-MARJET-RETURNS Using matlab / PYTHON
-This project examines the dynamics of U.S. equity market returns Using Matlab and Python
+This project examines the dynamics of U.S. equity market returns Using Python/mathlab
+import numpy as np
+import pandas as pd
+import pyflux as pf
+import matplotlib.pyplot as plt
+from statsmodels.stats.diagnostic import acorr_ljungbox
+from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+from scipy.optimize import minimize
+from scipy.stats import norm
+import warnings
+warnings.filterwarnings('ignore')
+
+
+# 1. LOAD AND PREPARE DATA
+
+print('LOADING DATA...')
+SSE = pd.read_csv("Shanghai SE A Share Historical Data.csv")
+SPX = pd.read_csv("S&P 500 Historical Data .csv")
+DXY = pd.read_csv("US_Dollar_Index_Historical_Data.csv")
+
+def clean_price(series):
+    if series.dtype == 'object':
+        return series.str.replace(',', '').astype(float)
+    return series.astype(float)
+
+priceSSE = clean_price(SSE['Price'])
+priceSPX = clean_price(SPX['Price'])
+priceDXY = clean_price(DXY['Price'])
+
+# Parse dates and flip (oldest to newest)
+dateSSE = pd.to_datetime(SSE['Date'])[::-1].reset_index(drop=True)
+dateSPX = pd.to_datetime(SPX['Date'])[::-1].reset_index(drop=True)
+dateDXY = pd.to_datetime(DXY['Date'])[::-1].reset_index(drop=True)
+
+priceSSE = priceSSE[::-1].reset_index(drop=True)
+priceSPX = priceSPX[::-1].reset_index(drop=True)
+priceDXY = priceDXY[::-1].reset_index(drop=True)
+
+# Find common dates
+common = pd.Index(dateSSE).intersection(pd.Index(dateSPX))
+common = common.intersection(pd.Index(dateDXY))
+
+idxSSE = dateSSE.isin(common)
+idxSPX = dateSPX.isin(common)
+idxDXY = dateDXY.isin(common)
+
+# Synchronized data
+prSSE = priceSSE[idxSSE].values
+prSPX = priceSPX[idxSPX].values
+prDXY = priceDXY[idxDXY].values
+date_sync = common.values
+
+# Calculate returns (percentage log returns)
+rtSSE = 100 * np.diff(np.log(prSSE))
+rtSPX = 100 * np.diff(np.log(prSPX))
+rtDXY = 100 * np.diff(np.log(prDXY))
+date = date_sync[1:]
+
+print(f'Data loaded. Sample size: {len(rtSPX)} observations')
+
+
+# 2. AUTOCORRELATION TESTS
+
+
+print('\n' + '='*60)
+print('AUTOCORRELATION TESTS')
+print('='*60)
+
+# Test for autocorrelation of returns
+lb = acorr_ljungbox(rtSPX, lags=20, return_df=True)
+pval = lb['lb_pvalue'].iloc[-1]
+h0 = 1 if pval < 0.05 else 0
+print(f'\nTEST FOR AUTOCORRELATION OF RETURNS:')
+print(f'h = {h0}, p-value = {pval:.6f}')
+print('Result: Reject H0 - There IS autocorrelation' if h0 else 'Result: Fail to reject H0')
+
+# Test for autocorrelation of squared returns
+lb_sq = acorr_ljungbox(rtSPX**2, lags=20, return_df=True)
+pval_sq = lb_sq['lb_pvalue'].iloc[-1]
+h0_sq = 1 if pval_sq < 0.05 else 0
+print(f'\nTEST FOR AUTOCORRELATION OF SQUARED RETURNS:')
+print(f'h = {h0_sq}, p-value = {pval_sq:.6f}')
+print('Result: Reject H0 - There IS volatility clustering' if h0_sq else 'Result: Fail to reject H0')
+
+# Ljung-Box on squared returns for multiple lags
+print('\n=== LJUNG-BOX TEST ON SQUARED RETURNS ===')
+print('Lag    h-statistic    p-value')
+print('-'*45)
+for lag in [1, 5, 10, 15, 20]:
+    res = acorr_ljungbox(rtSPX**2, lags=lag, return_df=True)
+    pv = res['lb_pvalue'].iloc[-1]
+    hh = 1 if pv < 0.05 else 0
+    print(f'{lag:<4}    {hh:<12}    {pv:.6f}')
+
+
+# 3. ACF / PACF PLOTS
+
+
+print('\nGENERATING ACF/PACF PLOTS...')
+fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+plot_acf(rtSPX, ax=axes[0,0], lags=20, title='ACF of S&P 500 Returns')
+plot_pacf(rtSPX, ax=axes[0,1], lags=20, title='PACF of S&P 500 Returns')
+plot_acf(rtSPX**2, ax=axes[1,0], lags=20, title='ACF of Squared Returns')
+plot_pacf(rtSPX**2, ax=axes[1,1], lags=20, title='PACF of Squared Returns')
+plt.tight_layout()
+plt.show()
+
+
+# 4. ARMAX MODELS USING PYFLUX
+
+
+print('\n' + '='*60)
+print('ARMAX MODEL ESTIMATION (PyFlux)')
+print('='*60)
+
+# Prepare data for PyFlux
+X_var_SSE = rtSSE[:-1]
+X_var_DXY = rtDXY[:-1]
+X_var_combined = np.column_stack([X_var_SSE, X_var_DXY])
+
+y = rtSPX[1:]  # S&P returns (dependent variable)
+exog_df = pd.DataFrame({
+    'y': y,
+    'x1': X_var_combined[:-1, 0],  # lagged SSE
+    'x2': X_var_combined[:-1, 1]   # lagged DXY
+})
+
+# Store all models and residuals
+armax_models = {}
+armax_residuals = {}
+
+# Model specifications
+model_specs = [
+    ('ARMAX(1,1)', 1, 1),
+    ('ARMAX(1,3)', 1, 3),
+    ('ARMAX(3,1)', 3, 1),
+    ('ARMAX(3,3)', 3, 3),
+]
+
+for name, ar, ma in model_specs:
+    print(f'\n========== {name} ==========')
+    
+    try:
+        # Build ARIMAX model (ARMAX with exogenous variables)
+        model = pf.ARIMAX(
+            data=exog_df,
+            formula='y ~ 1 + x1 + x2',
+            ar=ar,
+            ma=ma,
+            family=pf.Normal()
+        )
+        
+        # Estimate via Maximum Likelihood
+        res = model.fit('MLE')
+        
+        # Extract information
+        residuals = res.residuals.dropna().values
+        n_params = len(res.params)
+        
+        # Calculate AIC and BIC manually
+        log_likelihood = res.log_likelihood
+        aic = -2 * log_likelihood + 2 * n_params
+        bic = -2 * log_likelihood + n_params * np.log(len(residuals))
+        
+        # Ljung-Box test on residuals
+        lb_test = acorr_ljungbox(residuals, lags=20, return_df=True)
+        pval_resid = lb_test['lb_pvalue'].iloc[-1]
+        h_resid = 1 if pval_resid < 0.05 else 0
+        
+        print(f'AIC = {aic:.4f}, BIC = {bic:.4f}')
+        print(f'Residual Ljung-Box p-value = {pval_resid:.4f}')
+        print(f'Residual Ljung-Box h = {h_resid}')
+        print('\nCoefficients:')
+        print(res.summary())
+        
+        armax_models[name] = {
+            'model': model,
+            'results': res,
+            'aic': aic,
+            'bic': bic,
+            'residuals': residuals,
+            'pval_resid': pval_resid
+        }
+        armax_residuals[name] = residuals
+        
+    except Exception as e:
+        print(f'Error estimating {name}: {e}')
+
+# Select best model based on AIC
+best_model_name = min(armax_models.keys(), key=lambda x: armax_models[x]['aic'])
+best_residuals = armax_models[best_model_name]['residuals']
+print(f'\nBest model based on AIC: {best_model_name}')
+
+# 5. CUSTOM CCC-MVGARCH IMPLEMENTATION
+
+print('\n' + '='*60)
+print('CCC-MVGARCH ESTIMATION (Custom Implementation)')
+print('='*60)
+
+class CCC_MVGARCH:
+    """
+    Constant Conditional Correlation Multivariate GARCH
+    """
+    def __init__(self, returns, p=1, q=1):
+        self.returns = returns
+        self.T, self.n = returns.shape
+        self.p = p
+        self.q = q
+        
+    def estimate_univariate_garch(self, series):
+        """Estimate univariate GARCH for a single series"""
+        # Simple GARCH(1,1) implementation using MLE
+        def garch_likelihood(params, data):
+            omega, alpha, beta = params
+            T = len(data)
+            sigma2 = np.zeros(T)
+            sigma2[0] = np.var(data)
+            for t in range(1, T):
+                sigma2[t] = omega + alpha * data[t-1]**2 + beta * sigma2[t-1]
+            ll = -0.5 * np.sum(np.log(2*np.pi*sigma2) + data**2/sigma2)
+            return -ll
+        
+        # Initial parameters
+        init_params = [0.01, 0.1, 0.8]
+        bounds = [(1e-6, None), (1e-6, 1), (1e-6, 1)]
+        
+        result = minimize(
+            garch_likelihood, 
+            init_params, 
+            args=(series,),
+            bounds=bounds,
+            method='L-BFGS-B'
+        )
+        
+        return result.x
+    
+    def estimate(self):
+        """Estimate CCC-MVGARCH model"""
+        # Step 1: Estimate univariate GARCH for each series
+        self.omega = np.zeros(self.n)
+        self.alpha = np.zeros(self.n)
+        self.beta = np.zeros(self.n)
+        self.volatility = np.zeros((self.T, self.n))
+        self.std_residuals = np.zeros((self.T, self.n))
+        
+        for i in range(self.n):
+            print(f'Estimating univariate GARCH for series {i+1}...')
+            params = self.estimate_univariate_garch(self.returns[:, i])
+            self.omega[i], self.alpha[i], self.beta[i] = params
+            
+            # Compute conditional variances
+            sigma2 = np.zeros(self.T)
+            sigma2[0] = np.var(self.returns[:, i])
+            for t in range(1, self.T):
+                sigma2[t] = params[0] + params[1] * self.returns[t-1, i]**2 + params[2] * sigma2[t-1]
+            
+            self.volatility[:, i] = np.sqrt(sigma2)
+            self.std_residuals[:, i] = self.returns[:, i] / self.volatility[:, i]
+        
+        # Step 2: Compute constant correlation matrix
+        self.correlation = np.corrcoef(self.std_residuals.T)
+        
+        # Step 3: Compute log-likelihood
+        self.log_likelihood = self.compute_log_likelihood()
+        
+        return self
+    
+    def compute_log_likelihood(self):
+        """Compute log-likelihood for CCC-MVGARCH"""
+        ll = 0
+        R_inv = np.linalg.inv(self.correlation)
+        for t in range(self.T):
+            D = np.diag(self.volatility[t, :])
+            H = D @ self.correlation @ D
+            ll += -0.5 * (self.n * np.log(2*np.pi) + np.log(np.linalg.det(H)) + 
+                          self.returns[t, :] @ np.linalg.inv(H) @ self.returns[t, :])
+        return ll
+    
+    def get_conditional_volatilities(self):
+        return self.volatility
+    
+    def get_correlation_matrix(self):
+        return self.correlation
+
+# Prepare data for multivariate GARCH
+# Use residuals from best ARMAX model and SSE returns
+errors_matrix = np.column_stack([
+    best_residuals[:len(rtSSE)-1],
+    rtSSE[-len(best_residuals):-1] if len(best_residuals) <= len(rtSSE)-1 else rtSSE[:len(best_residuals)]
+])
+
+# Align lengths
+min_len = min(len(errors_matrix), len(rtSSE)-1)
+errors_matrix = errors_matrix[:min_len, :]
+sse_aligned = rtSSE[:min_len]
+
+# Create error matrix
+error_matrix = np.column_stack([errors_matrix[:, 0], sse_aligned])
+
+print(f'\nEstimating CCC-MVGARCH with {error_matrix.shape[0]} observations...')
+ccc_model = CCC_MVGARCH(error_matrix, p=1, q=1)
+ccc_results = ccc_model.estimate()
+
+print('\nCCC-MVGARCH Results:')
+print(f'Log-likelihood: {ccc_results.log_likelihood:.4f}')
+print(f'Conditional Variance Parameters:')
+print(f'Omega: {ccc_results.omega}')
+print(f'Alpha: {ccc_results.alpha}')
+print(f'Beta: {ccc_results.beta}')
+print(f'\nConstant Correlation Matrix:')
+print(ccc_results.correlation)
+
+# Extract conditional volatilities
+ccc_volatility = ccc_results.get_conditional_volatilities()
+
+# Plot conditional volatilities
+fig, axes = plt.subplots(2, 1, figsize=(14, 8))
+axes[0].plot(date[:len(ccc_volatility)], ccc_volatility[:, 0])
+axes[0].set_title('S&P 500 Conditional Volatility (CCC-MVGARCH)')
+axes[0].set_xlabel('Date')
+axes[0].set_ylabel('Volatility')
+axes[0].grid(True)
+
+axes[1].plot(date[:len(ccc_volatility)], ccc_volatility[:, 1])
+axes[1].set_title('SSE Conditional Volatility (CCC-MVGARCH)')
+axes[1].set_xlabel('Date')
+axes[1].set_ylabel('Volatility')
+axes[1].grid(True)
+plt.tight_layout()
+plt.show()
+
+
+# 6. CUSTOM DCC-MVGARCH IMPLEMENTATION
+
+
+print('\n' + '='*60)
+print('DCC-MVGARCH ESTIMATION (Custom Implementation)')
+print('='*60)
+
+class DCC_MVGARCH:
+    """
+    Dynamic Conditional Correlation Multivariate GARCH
+    """
+    def __init__(self, returns, p=1, q=1):
+        self.returns = returns
+        self.T, self.n = returns.shape
+        self.p = p
+        self.q = q
+        
+    def estimate_univariate_garch(self, series):
+        """Estimate univariate GARCH for a single series"""
+        def garch_likelihood(params, data):
+            omega, alpha, beta = params
+            T = len(data)
+            sigma2 = np.zeros(T)
+            sigma2[0] = np.var(data)
+            for t in range(1, T):
+                sigma2[t] = omega + alpha * data[t-1]**2 + beta * sigma2[t-1]
+            ll = -0.5 * np.sum(np.log(2*np.pi*sigma2) + data**2/sigma2)
+            return -ll
+        
+        init_params = [0.01, 0.1, 0.8]
+        bounds = [(1e-6, None), (1e-6, 1), (1e-6, 1)]
+        
+        result = minimize(
+            garch_likelihood, 
+            init_params, 
+            args=(series,),
+            bounds=bounds,
+            method='L-BFGS-B'
+        )
+        
+        return result.x
+    
+    def dcc_likelihood(self, params):
+        """DCC log-likelihood function"""
+        a, b = params
+        
+        # Constrain parameters
+        if a < 0 or b < 0 or a + b >= 1:
+            return 1e10
+        
+        # Compute DCC correlation dynamics
+        Q_bar = np.cov(self.std_residuals.T)
+        Q = np.zeros((self.T, self.n, self.n))
+        R = np.zeros((self.T, self.n, self.n))
+        
+        Q[0] = Q_bar
+        R[0] = Q_bar / np.sqrt(np.outer(np.diag(Q_bar), np.diag(Q_bar)))
+        
+        for t in range(1, self.T):
+            z_t = self.std_residuals[t-1, :].reshape(-1, 1)
+            Q[t] = (1 - a - b) * Q_bar + a * (z_t @ z_t.T) + b * Q[t-1]
+            
+            # Ensure positive definite
+            Q[t] = (Q[t] + Q[t].T) / 2
+            diag_sqrt = np.sqrt(np.diag(Q[t]))
+            R[t] = Q[t] / np.outer(diag_sqrt, diag_sqrt)
+            R[t] = (R[t] + R[t].T) / 2  # Ensure symmetry
+        
+        # Compute log-likelihood
+        ll = 0
+        for t in range(self.T):
+            D = np.diag(self.volatility[t, :])
+            try:
+                H = D @ R[t] @ D
+                ll += -0.5 * (self.n * np.log(2*np.pi) + np.log(np.linalg.det(H)) + 
+                              self.returns[t, :] @ np.linalg.inv(H) @ self.returns[t, :])
+            except:
+                return 1e10
+        
+        self.R = R
+        self.Q = Q
+        return -ll
+    
+    def estimate(self):
+        """Estimate DCC-MVGARCH model"""
+        # Step 1: Estimate univariate GARCH for each series
+        self.omega = np.zeros(self.n)
+        self.alpha = np.zeros(self.n)
+        self.beta = np.zeros(self.n)
+        self.volatility = np.zeros((self.T, self.n))
+        self.std_residuals = np.zeros((self.T, self.n))
+        
+        for i in range(self.n):
+            print(f'Estimating univariate GARCH for series {i+1}...')
+            params = self.estimate_univariate_garch(self.returns[:, i])
+            self.omega[i], self.alpha[i], self.beta[i] = params
+            
+            sigma2 = np.zeros(self.T)
+            sigma2[0] = np.var(self.returns[:, i])
+            for t in range(1, self.T):
+                sigma2[t] = params[0] + params[1] * self.returns[t-1, i]**2 + params[2] * sigma2[t-1]
+            
+            self.volatility[:, i] = np.sqrt(sigma2)
+            self.std_residuals[:, i] = self.returns[:, i] / self.volatility[:, i]
+        
+        # Step 2: Estimate DCC parameters
+        print('\nEstimating DCC parameters...')
+        init_params = [0.05, 0.90]  # a, b
+        bounds = [(0.001, 0.5), (0.001, 0.99)]
+        
+        result = minimize(
+            self.dcc_likelihood,
+            init_params,
+            bounds=bounds,
+            method='L-BFGS-B'
+        )
+        
+        self.dcc_a, self.dcc_b = result.x
+        self.log_likelihood = -result.fun
+        
+        # Compute final correlation matrices
+        self.dcc_likelihood([self.dcc_a, self.dcc_b])
+        
+        return self
+    
+    def get_conditional_volatilities(self):
+        return self.volatility
+    
+    def get_correlations(self):
+        """Return time-varying correlations"""
+        if hasattr(self, 'R'):
+            correlations = np.zeros((self.T, self.n, self.n))
+            for t in range(self.T):
+                correlations[t] = self.R[t]
+            return correlations
+        return None
+    
+    def get_rho(self):
+        """Extract correlation between first two series"""
+        if hasattr(self, 'R'):
+            rho = np.zeros(self.T)
+            for t in range(self.T):
+                rho[t] = self.R[t, 0, 1]
+            return rho
+        return None
+
+print(f'\nEstimating DCC-MVGARCH with {error_matrix.shape[0]} observations...')
+dcc_model = DCC_MVGARCH(error_matrix, p=1, q=1)
+dcc_results = dcc_model.estimate()
+
+print('\nDCC-MVGARCH Results:')
+print(f'Log-likelihood: {dcc_results.log_likelihood:.4f}')
+print(f'Conditional Variance Parameters:')
+print(f'Omega: {dcc_results.omega}')
+print(f'Alpha: {dcc_results.alpha}')
+print(f'Beta: {dcc_results.beta}')
+print(f'\nDCC Parameters:')
+print(f'a = {dcc_results.dcc_a:.6f}')
+print(f'b = {dcc_results.dcc_b:.6f}')
+
+# Extract dynamic correlations
+rho_dcc = dcc_results.get_rho()
+if rho_dcc is not None:
+    print(f'\nDynamic Correlation Summary:')
+    print(f'Mean: {np.mean(rho_dcc):.6f}')
+    print(f'Std: {np.std(rho_dcc):.6f}')
+    print(f'Min: {np.min(rho_dcc):.6f}')
+    print(f'Max: {np.max(rho_dcc):.6f}')
+
+# Extract conditional volatilities
+dcc_volatility = dcc_results.get_conditional_volatilities()
+
+
+# 7. PLOT DCC DYNAMIC CORRELATIONS
+
+
+print('\nGENERATING DCC CORRELATION PLOTS...')
+
+fig, axes = plt.subplots(3, 1, figsize=(14, 12))
+
+# Plot DCC dynamic correlations
+if rho_dcc is not None:
+    axes[0].plot(date[:len(rho_dcc)], rho_dcc, 'b-', linewidth=1.5)
+    axes[0].axhline(y=np.mean(rho_dcc), color='r', linestyle='--', label=f'Mean: {np.mean(rho_dcc):.4f}')
+    axes[0].set_title('Time-Varying Correlations - DCC-MVGARCH')
+    axes[0].set_xlabel('Date')
+    axes[0].set_ylabel('Correlation')
+    axes[0].legend()
+    axes[0].grid(True)
+
+# Plot conditional volatilities
+axes[1].plot(date[:len(dcc_volatility)], dcc_volatility[:, 0], 'g-', linewidth=1.5)
+axes[1].set_title('S&P 500 Conditional Volatility - DCC-MVGARCH')
+axes[1].set_xlabel('Date')
+axes[1].set_ylabel('Volatility')
+axes[1].grid(True)
+
+axes[2].plot(date[:len(dcc_volatility)], dcc_volatility[:, 1], 'orange', linewidth=1.5)
+axes[2].set_title('SSE Conditional Volatility - DCC-MVGARCH')
+axes[2].set_xlabel('Date')
+axes[2].set_ylabel('Volatility')
+axes[2].grid(True)
+
+plt.tight_layout()
+plt.show()
+
+
+# 8. COMPARE CCC AND DCC RESULTS
+
+
+print('\n' + '='*60)
+print('COMPARISON: CCC vs DCC-MVGARCH')
+print('='*60)
+
+print(f'\nCCC-MVGARCH Log-likelihood: {ccc_results.log_likelihood:.4f}')
+print(f'DCC-MVGARCH Log-likelihood: {dcc_results.log_likelihood:.4f}')
+print(f'\nLikelihood Ratio Test: {2 * (dcc_results.log_likelihood - ccc_results.log_likelihood):.4f}')
+
+# CCC Correlation
+ccc_corr = ccc_results.get_correlation_matrix()
+print(f'\nCCC Constant Correlation: {ccc_corr[0, 1]:.6f}')
+
+# DCC Average Correlation
+if rho_dcc is not None:
+    print(f'DCC Average Correlation: {np.mean(rho_dcc):.6f}')
+
+
+# 9. FORECASTING WITH ARMAX
+print('\n' + '='*60)
+print('FORECASTING WITH ARMAX')
+print('='*60)
+
+# Use the best ARMAX model for forecasting
+best_model = armax_models[best_model_name]['model']
+
+# Prepare future exogenous variables
+n_forecast = 10
+future_exog = exog_df[['x1', 'x2']].iloc[-n_forecast:]
+
+print(f'Generating {n_forecast}-step ahead forecast with {best_model_name}...')
+
+try:
+    forecast = best_model.predict(h=n_forecast, oos_data=future_exog)
+    print('\nForecast:')
+    print(forecast)
+    
+    # Plot forecast
+    best_model.plot_predict(h=n_forecast, oos_data=future_exog, past_values=50)
+    plt.title(f'{best_model_name} Forecast')
+    plt.show()
+except Exception as e:
+    print(f'Forecasting error: {e}')
+    print('Try reducing forecast horizon or using in-sample predictions.')
+
+print('\n' + '='*60)
+print('ANALYSIS COMPLETE')
+print('='*60)
+
+
+MATHLAB CODE
 clear; clc; close all; warning off;
 
 %% Load data
@@ -227,6 +818,7 @@ for i = 1:T
     rho(i,1) = temp(1,2); % extract correlation
 end
 
+
 % Plot of dynamic correlations
 figure('Name', 'Time varying correlations - DCC');
 plot(date(2:length(rho)+1), rho)
@@ -236,299 +828,17 @@ ylabel('Correlation')
 grid on;
 
 
-Same estimations USING PYTHON
-import pandas as pd
-import numpy as np
-from scipy import stats
-from statsmodels.tsa.stattools import acf, pacf
-from statsmodels.stats.diagnostic import acorr_ljungbox
-from statsmodels.tsa.arima.model import ARIMA
-import matplotlib.pyplot as plt
-import warnings
-warnings.filterwarnings('ignore')
-
-# Note: For the armaxfilter, ccc_mvgarch, and dcc functions,  specialized packages or custom implementations.
-
-# Load data
-SSE = pd.read_csv("Shanghai SE A Share Historical Data.csv")
-SPX = pd.read_csv("S&P 500 Historical Data .csv")
-DXY = pd.read_csv("US_Dollar_Index_Historical_Data.csv")
-
-# Price extraction and cleaning
-def clean_price_column(price_col):
-    if price_col.dtype == 'object':
-        # Remove commas and convert to float
-        return price_col.str.replace(',', '').astype(float)
-    return price_col.astype(float)
-
-priceSSE = clean_price_column(SSE['Price'])
-priceSPX = clean_price_column(SPX['Price'])
-priceDXY = clean_price_column(DXY['Price'])
-
-# Convert dates and flip (oldest to newest)
-dateSSE = pd.to_datetime(SSE['Date'])[::-1].reset_index(drop=True)
-dateSPX = pd.to_datetime(SPX['Date'])[::-1].reset_index(drop=True)
-dateDXY = pd.to_datetime(DXY['Date'])[::-1].reset_index(drop=True)
-
-priceSSE = priceSSE[::-1].reset_index(drop=True)
-priceSPX = priceSPX[::-1].reset_index(drop=True)
-priceDXY = priceDXY[::-1].reset_index(drop=True)
-
-# Find common dates
-common_dates = pd.Series(pd.Index(dateSSE).intersection(pd.Index(dateSPX)))
-common_dates = pd.Series(pd.Index(common_dates).intersection(pd.Index(dateDXY)))
-
-idxSSE = dateSSE.isin(common_dates)
-idxSPX = dateSPX.isin(common_dates)
-idxDXY = dateDXY.isin(common_dates)
-
-# Synchronized data
-prSPX = priceSPX[idxSPX].values
-prSSE = priceSSE[idxSSE].values
-prDXY = priceDXY[idxDXY].values
-date_sync = common_dates.values
-
-# Calculate returns
-rtSPX = 100 * np.diff(np.log(prSPX))
-rtSSE = 100 * np.diff(np.log(prSSE))
-rtDXY = 100 * np.diff(np.log(prDXY))
-date = date_sync[1:]
-
-# TEST FOR AUTOCORRELATION OF RETURNS
-print('\n' + '='*40)
-print('TEST FOR AUTOCORRELATION OF RETURNS')
-print('='*40)
-
-# Ljung-Box test
-lb_test = acorr_ljungbox(rtSPX, lags=20, return_df=True)
-pval = lb_test['lb_pvalue'].values[-1]
-h0 = 1 if pval < 0.05 else 0
-print(f'h = {h0}, p-value = {pval:.6f}')
-if h0 == 1:
-    print('Result: Reject H0 - There IS autocorrelation in returns')
-else:
-    print('Result: Fail to reject H0 - No significant autocorrelation')
-
-# TEST FOR AUTOCORRELATION OF SQUARED RETURNS
-print('\n' + '='*40)
-print('TEST FOR AUTOCORRELATION OF SQUARED RETURNS')
-print('='*40)
-
-lb_test_sq = acorr_ljungbox(rtSPX**2, lags=20, return_df=True)
-pval_sq = lb_test_sq['lb_pvalue'].values[-1]
-h0_sq = 1 if pval_sq < 0.05 else 0
-print(f'h = {h0_sq}, p-value = {pval_sq:.6f}')
-if h0_sq == 1:
-    print('Result: Reject H0 - There IS volatility clustering')
-else:
-    print('Result: Fail to reject H0 - No significant volatility clustering')
-
-# ACF AND PACF PLOTS
-print('\n=== GENERATING ACF AND PACF PLOTS ===')
-
-fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-
-# ACF of returns
-acf_vals = acf(rtSPX, nlags=20)
-axes[0, 0].stem(range(len(acf_vals)), acf_vals)
-axes[0, 0].axhline(y=1.96/np.sqrt(len(rtSPX)), color='r', linestyle='--')
-axes[0, 0].axhline(y=-1.96/np.sqrt(len(rtSPX)), color='r', linestyle='--')
-axes[0, 0].set_title('ACF of S&P 500 Returns')
-axes[0, 0].grid(True)
-
-# PACF of returns
-pacf_vals = pacf(rtSPX, nlags=20)
-axes[0, 1].stem(range(len(pacf_vals)), pacf_vals)
-axes[0, 1].axhline(y=1.96/np.sqrt(len(rtSPX)), color='r', linestyle='--')
-axes[0, 1].axhline(y=-1.96/np.sqrt(len(rtSPX)), color='r', linestyle='--')
-axes[0, 1].set_title('PACF of S&P 500 Returns')
-axes[0, 1].grid(True)
-
-# ACF of squared returns
-acf_sq = acf(rtSPX**2, nlags=20)
-axes[1, 0].stem(range(len(acf_sq)), acf_sq)
-axes[1, 0].axhline(y=1.96/np.sqrt(len(rtSPX)), color='r', linestyle='--')
-axes[1, 0].axhline(y=-1.96/np.sqrt(len(rtSPX)), color='r', linestyle='--')
-axes[1, 0].set_title('ACF of S&P 500 Squared Returns')
-axes[1, 0].grid(True)
-
-# PACF of squared returns
-pacf_sq = pacf(rtSPX**2, nlags=20)
-axes[1, 1].stem(range(len(pacf_sq)), pacf_sq)
-axes[1, 1].axhline(y=1.96/np.sqrt(len(rtSPX)), color='r', linestyle='--')
-axes[1, 1].axhline(y=-1.96/np.sqrt(len(rtSPX)), color='r', linestyle='--')
-axes[1, 1].set_title('PACF of S&P 500 Squared Returns')
-axes[1, 1].grid(True)
-
-plt.tight_layout()
-plt.show()
-
-# LJUNG-BOX TEST ON SQUARED RETURNS FOR MULTIPLE LAGS
-print('\n=== LJUNG-BOX TEST ON SQUARED RETURNS ===')
-print('Lag    h-statistic    p-value')
-print('-'*40)
-
-for lag in [1, 5, 10, 15, 20]:
-    lb_test_lag = acorr_ljungbox(rtSPX**2, lags=lag, return_df=True)
-    pval_lb = lb_test_lag['lb_pvalue'].values[-1]
-    h_lb = 1 if pval_lb < 0.05 else 0
-    print(f'{lag:<4}    {h_lb:<12}    {pval_lb:.6f}')
-
-print('\n=== AUTOCORRELATION ANALYSIS COMPLETE ===')
-
-# Exogeneous Variables (Lagged returns of SSE and DXY)
-X_var_SSE = rtSSE[:-1]
-X_var_DXY = rtDXY[:-1]
-X_var_combined = np.column_stack([X_var_SSE, X_var_DXY])
+THIS CODE IS MATLAB SWITCH TO PYTHON
 
 
-# IMPORTANT NOTE: The armaxfilter function in MATLAB is not directly available  in Python. Below are alternatives using statsmodels ARIMA and custom implementations. For full armaxfilter functionality, consider using the arch package or PyFlux.
 
 
-print('\n' + '='*40)
-print('ARMAX MODEL ESTIMATION (ALTERNATIVE APPROACH)')
-print('='*40)
-print('Note: Python does not have a direct equivalent to MATLAB\'s armaxfilter.')
-print('Using statsmodels ARIMA with exogenous variables as an alternative.')
-print('For more advanced GARCH-MIDAS models, consider the "arch" package.')
-print('='*40)
-
-# Alternative: Use statsmodels ARIMA with exog variables
-# Note: This is a simplified version - you may need to adjust for your specific needs
-
-# Since we can't directly replicate armaxfilter, here's an alternative approach
-from statsmodels.tsa.statespace.sarimax import SARIMAX
-
-# Fit different ARIMA models with exogenous variables
-def fit_armax_exog(y, exog, ar_order, ma_order):
-    """Fit ARMAX model with exogenous variables"""
-    # ARIMA model with exogenous variables
-    model = SARIMAX(y, 
-                    order=(ar_order, 0, ma_order),
-                    exog=exog,
-                    trend='c',
-                    enforce_stationarity=False,
-                    enforce_invertibility=False)
-    result = model.fit(disp=False)
-    return result
-
-# Model 1: ARMAX(1,1)
-print('\n========== MODEL 1: ARMAX(1,1) ==========')
-model1 = fit_armax_exog(rtSPX[1:], X_var_combined[:-1], 1, 1)
-print(f'AIC = {model1.aic:.4f}, BIC = {model1.bic:.4f}')
-print('Summary:')
-print(model1.summary())
-
-# Model 2: ARMAX(1,3)
-print('\n========== MODEL 2: ARMAX(1,3) ==========')
-model2 = fit_armax_exog(rtSPX[1:], X_var_combined[:-1], 1, 3)
-print(f'AIC = {model2.aic:.4f}, BIC = {model2.bic:.4f}')
-print('Summary:')
-print(model2.summary())
-
-# Model 3: ARMAX(3,1)
-print('\n========== MODEL 3: ARMAX(3,1) ==========')
-model3 = fit_armax_exog(rtSPX[1:], X_var_combined[:-1], 3, 1)
-print(f'AIC = {model3.aic:.4f}, BIC = {model3.bic:.4f}')
-print('Summary:')
-print(model3.summary())
-
-# Model 4: ARMAX(3,3)
-print('\n========== MODEL 4: ARMAX(3,3) ==========')
-model4 = fit_armax_exog(rtSPX[1:], X_var_combined[:-1], 3, 3)
-print(f'AIC = {model4.aic:.4f}, BIC = {model4.bic:.4f}')
-print('Summary:')
-print(model4.summary())
 
 
-# GARCH ESTIMATION  For CCC-MVGARCH and DCC-MVGARCH, you'll need specialized packages. Below is an example using the 'arch' package for univariate GARCH. For multivariate GARCH, consider 'mgarch' or implement manually.
 
 
-print('\n' + '='*40)
-print('GARCH ESTIMATION')
-print('='*40)
-print('Note: Python has limited support for multivariate GARCH models.')
-print('For univariate GARCH, use the "arch" package.')
-print('For multivariate GARCH (CCC/DCC), consider implementing manually')
-print('or using the "mgarch" package (if available).')
-print('='*40)
-
-# Univariate GARCH example using arch package
-try:
-    from arch import arch_model
-    
-    # Fit GARCH(1,1) model on S&P 500 returns
-    am = arch_model(rtSPX, vol='Garch', p=1, q=1)
-    res = am.fit(disp='off')
-    print('\nUnivariate GARCH(1,1) for S&P 500:')
-    print(res.summary())
-    
-except ImportError:
-    print('\n"arch" package not installed. Install with: pip install arch')
-
-# For multivariate GARCH, you can implement CCC-MVGARCH manually, CONSTANT CONDITIONAL CORRELATION MULATIVARIATIVE GENENAL AUTOREGRESSIVE CONDITIONAL HETEROSKEDASTICITY / AND THE DYNAMIC CONDITIONAL CORRELATION MULATIVARIATIVE GENENAL AUTOREGRESSIVE CONDITIONAL HETEROSKEDASTICITY 
-print('\n' + '='*40)
-print('MULTIVARIATE GARCH (CCC-MVGARCH and DCC-MVGARCH)')
-print('='*40)
-print('Full implementation of CCC-MVGARCH and DCC-MVGARCH requires')
-print('custom coding in Python. The key steps are:')
-print('1. Estimate univariate GARCH models for each series')
-print('2. Extract conditional volatilities')
-print('3. For CCC: Compute constant correlation matrix from standardized residuals')
-print('4. For DCC: Model dynamic correlations using DCC equations')
-print('='*40)
-
-
-# Alternatively:
-
-def estimate_dcc_garch_simple(returns, p=1, q=1):
-    """
-    Simplified DCC-GARCH estimation (illustration only)
-    """
-    n_assets = returns.shape[1]
-    T = returns.shape[0]
-    
-    # Step 1: Estimate univariate GARCH for each asset
-    import warnings
-    warnings.filterwarnings('ignore')
-    from arch import arch_model
-    
-    univ_vols = np.zeros((T, n_assets))
-    std_resids = np.zeros((T, n_assets))
-    
-    for i in range(n_assets):
-        am = arch_model(returns[:, i], vol='Garch', p=p, q=q)
-        res = am.fit(disp='off')
-        univ_vols[:, i] = res.conditional_volatility
-        std_resids[:, i] = res.resid / res.conditional_volatility
-    
-    # Step 2: Compute unconditional correlation (simplified CCC)
-    corr_matrix = np.corrcoef(std_resids.T)
-    
-    # Step 3: For DCC, you would estimate dynamic correlations here
-    # This is a placeholder for the full DCC implementation
-    
-    print(f'\nCCC Correlation Matrix:')
-    print(corr_matrix)
-    
-    return univ_vols, std_resids, corr_matrix
-
-# (using the residuals from ARMAX model)
-
-errors_matrix = np.column_stack([
-    model4.resid,  # residuals from S&P 500 model
-    rtSSE[-len(model4.resid):]  # corresponding SSE returns (simplified)
-])
-
-print('\n=== CCC-MVGARCH (Simplified) ===')
-try:
-    vols, std_res, corr = estimate_dcc_garch_simple(errors_matrix, p=1, q=1)
-except Exception as e:
-    print(f'Error in estimation: {e}')
-
-print('\n' + '='*40)
-print('END OF ANALYSIS')
-print('='*40)
+## Example Output
+The script prints the first rows of the selected index return data.
 # Running the codes with data , generating results and the results are interpreted as
 
 The models are not statistically different from zero meaning that they hold no statistical significance. Yet, it cannot be ruled out that the true effect is zero, Certainly, there is an impact on the models that the predictive ability of the model is weak due to the insignificance of the variables p-values. The model is valid because of the auto-correlation insignificance. However, the coefficients could be jointly significant. This suggests the model's predictive power comes from the joint ARMA structure rather than any single lag, and neither Shanghai nor DXY show statistically significant predictive power for S&P 500 returns in this specification. 
