@@ -1,4 +1,4 @@
-# SP500-MARJET-RETURNS
+# SP500-MARJET-RETURNS Using matlab
 This project examines the dynamics of U.S. equity market returns Using Matlab and Python
 clear; clc; close all; warning off;
 
@@ -236,7 +236,7 @@ ylabel('Correlation')
 grid on;
 
 
-
+Same estimations USING PYTHON
 import pandas as pd
 import numpy as np
 from scipy import stats
@@ -247,9 +247,7 @@ import matplotlib.pyplot as plt
 import warnings
 warnings.filterwarnings('ignore')
 
-# Note: For the armaxfilter, ccc_mvgarch, and dcc functions, 
-# you'll need specialized packages or custom implementations.
-# I'll provide approximate implementations or suggest alternatives.
+# Note: For the armaxfilter, ccc_mvgarch, and dcc functions,  specialized packages or custom implementations.
 
 # Load data
 SSE = pd.read_csv("Shanghai SE A Share Historical Data.csv")
@@ -383,12 +381,9 @@ X_var_SSE = rtSSE[:-1]
 X_var_DXY = rtDXY[:-1]
 X_var_combined = np.column_stack([X_var_SSE, X_var_DXY])
 
-# ============================================================================
-# IMPORTANT NOTE: The armaxfilter function in MATLAB is not directly available 
-# in Python. Below are alternatives using statsmodels ARIMA and custom 
-# implementations. For full armaxfilter functionality, consider using 
-# the arch package or PyFlux.
-# ============================================================================
+
+# IMPORTANT NOTE: The armaxfilter function in MATLAB is not directly available  in Python. Below are alternatives using statsmodels ARIMA and custom implementations. For full armaxfilter functionality, consider using the arch package or PyFlux.
+
 
 print('\n' + '='*40)
 print('ARMAX MODEL ESTIMATION (ALTERNATIVE APPROACH)')
@@ -445,12 +440,9 @@ print(f'AIC = {model4.aic:.4f}, BIC = {model4.bic:.4f}')
 print('Summary:')
 print(model4.summary())
 
-# ============================================================================
-# GARCH ESTIMATION
-# For CCC-MVGARCH and DCC-MVGARCH, you'll need specialized packages.
-# Below is an example using the 'arch' package for univariate GARCH.
-# For multivariate GARCH, consider 'mgarch' or implement manually.
-# ============================================================================
+
+# GARCH ESTIMATION  For CCC-MVGARCH and DCC-MVGARCH, you'll need specialized packages. Below is an example using the 'arch' package for univariate GARCH. For multivariate GARCH, consider 'mgarch' or implement manually.
+
 
 print('\n' + '='*40)
 print('GARCH ESTIMATION')
@@ -474,8 +466,7 @@ try:
 except ImportError:
     print('\n"arch" package not installed. Install with: pip install arch')
 
-# For multivariate GARCH, you can implement CCC-MVGARCH manually
-# Here's a simplified placeholder
+# For multivariate GARCH, you can implement CCC-MVGARCH manually, Here's a simplified placeholder
 print('\n' + '='*40)
 print('MULTIVARIATE GARCH (CCC-MVGARCH and DCC-MVGARCH)')
 print('='*40)
@@ -487,10 +478,9 @@ print('3. For CCC: Compute constant correlation matrix from standardized residua
 print('4. For DCC: Model dynamic correlations using DCC equations')
 print('='*40)
 
-# ============================================================================
-# Alternative: You can implement DCC-GARCH using the 'arch' package
-# and custom code. Here's a simplified illustration:
-# ============================================================================
+
+# Alternative: You can implement DCC-GARCH using the 'arch' package and custom code. Here's a simplified illustration:
+
 
 def estimate_dcc_garch_simple(returns, p=1, q=1):
     """
