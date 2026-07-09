@@ -1,4 +1,4 @@
-# SP500-MARJET-RETURNS Using matlab
+# SP500-MARJET-RETURNS Using matlab / PYTHON
 This project examines the dynamics of U.S. equity market returns Using Matlab and Python
 clear; clc; close all; warning off;
 
@@ -466,7 +466,7 @@ try:
 except ImportError:
     print('\n"arch" package not installed. Install with: pip install arch')
 
-# For multivariate GARCH, you can implement CCC-MVGARCH manually, Here's a simplified placeholder
+# For multivariate GARCH, you can implement CCC-MVGARCH manually, CONSTANT CONDITIONAL CORRELATION MULATIVARIATIVE GENENAL AUTOREGRESSIVE CONDITIONAL HETEROSKEDASTICITY / AND THE DYNAMIC CONDITIONAL CORRELATION MULATIVARIATIVE GENENAL AUTOREGRESSIVE CONDITIONAL HETEROSKEDASTICITY 
 print('\n' + '='*40)
 print('MULTIVARIATE GARCH (CCC-MVGARCH and DCC-MVGARCH)')
 print('='*40)
@@ -479,8 +479,7 @@ print('4. For DCC: Model dynamic correlations using DCC equations')
 print('='*40)
 
 
-# Alternative: You can implement DCC-GARCH using the 'arch' package and custom code. Here's a simplified illustration:
-
+# Alternatively:
 
 def estimate_dcc_garch_simple(returns, p=1, q=1):
     """
