@@ -514,8 +514,8 @@ def estimate_dcc_garch_simple(returns, p=1, q=1):
     
     return univ_vols, std_resids, corr_matrix
 
-# Example usage (using the residuals from ARMAX model)
-# Note: This is simplified and for illustration only
+# (using the residuals from ARMAX model)
+
 errors_matrix = np.column_stack([
     model4.resid,  # residuals from S&P 500 model
     rtSSE[-len(model4.resid):]  # corresponding SSE returns (simplified)
