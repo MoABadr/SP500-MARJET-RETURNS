@@ -1,4 +1,4 @@
-# SP500-MARJET-RETURNS Using matlab / PYTHON
+# SP500-MARKET-RETURNS Using matlab / PYTHON
 This project examines the dynamics of U.S. equity market returns Using Python/mathlab
 import numpy as np
 import pandas as pd
